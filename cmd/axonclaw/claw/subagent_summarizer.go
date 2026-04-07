@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/looplj/axonhub/axon/agent"
 	"github.com/looplj/axonhub/axon/bus"
@@ -12,49 +13,149 @@ import (
 )
 
 const (
-	// SummarizerAgentName is the bundled subagent name used by the summarizer.
-	// Users can override it by placing a "summarizer.md" file in the subagents
-	// directory.
 	SummarizerAgentName = "axonclaw_summarizer"
 
-	summarizerSystemPrompt = `You are a context summarization assistant. Your task is to analyze the conversation history and create a concise summary that preserves critical information for future context.
+	compactInstruction = `
 
-## Instructions
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+Tool calls will be REJECTED and will waste your only turn — you will fail the task.
 
-1. Analyze the conversation and identify:
-   - Key decisions made and their rationale
-   - File changes (created, modified, deleted) with brief descriptions
-   - User preferences and coding style discovered
-   - Important entities (people, projects, concepts, tools)
-   - Task progress and current status
+---
 
-2. Use the Skill tool to load the "memory-management" skill, then follow its instructions to persist important long-term information:
-   - Store user preferences, key decisions, and important entities that should be remembered across sessions
-   - Organize memories by category (e.g. "longterm/preferences", "longterm/decisions", "daily/YYYY-MM-DD")
+## Context Compaction Task
 
-3. Return a concise plain-text summary (NOT JSON) that covers:
-   - What was discussed and accomplished
-   - Key decisions and their reasons
-   - File changes made
-   - Current task status and any pending items
+The conversation history above has grown too large and needs to be compacted.
 
-The summary will be injected into the conversation context to help the assistant maintain continuity. Keep it focused and concise — omit routine tool interactions and focus on what matters for continuing the work.`
+Your task: Create a concise summary that preserves critical information for continuing the work.
+
+### Analysis Phase
+First, analyze the conversation and identify:
+- Key decisions made and their rationale
+- File changes (created, modified, deleted) with brief descriptions
+- User preferences and coding style discovered
+- Important entities (people, projects, concepts, tools)
+- Task progress and current status
+- Errors encountered and how they were resolved
+
+### Summary Output
+Return a concise plain-text summary (NOT JSON) that covers:
+
+1. **Primary Request**: What the user originally asked for
+2. **Key Decisions**: Important choices made and why
+3. **Files Changed**: List of files created/modified/deleted with brief descriptions
+4. **Current State**: What is actively being worked on right now
+5. **Pending Items**: Any unfinished tasks or next steps
+6. **Important Context**: User preferences, constraints, or other critical info
+
+The summary will be injected into the conversation context to help continue the work.
+Keep it focused and concise — omit routine tool interactions and focus on what matters for continuing the work.
+
+Do NOT call any tools. Respond with TEXT ONLY.`
 )
 
-// SummarizerDefinition returns the bundled subagent Definition for the
-// summarizer. Register it on a Manager via RegisterBundled before Load so
-// that users can override the prompt / tools / model via a .md file.
 func SummarizerDefinition() *subagent.Definition {
 	return &subagent.Definition{
 		Name:        SummarizerAgentName,
 		Hidden:      true,
-		Description: summarizerSystemPrompt,
-		Tools: map[string]bool{
-			"*":     true,
-			"Skill": true,
-			"Bash":  true,
-		},
+		Description: "Context compaction summarizer",
+		Tools:       map[string]bool{},
 	}
+}
+
+type Summarizer interface {
+	Summarize(ctx context.Context, messages []agent.Message) (string, error)
+}
+
+type ForkedCompactSummarizer struct {
+	agent       *agent.Agent
+	provider    agent.Provider
+	model       string
+	logger      *slog.Logger
+	bus         bus.EventBus
+	middlewares []agent.Middleware
+}
+
+type ForkedCompactSummarizerOptions struct {
+	Agent       *agent.Agent
+	Provider    agent.Provider
+	Model       string
+	Logger      *slog.Logger
+	Bus         bus.EventBus
+	Middlewares []agent.Middleware
+}
+
+func NewForkedCompactSummarizer(opts ForkedCompactSummarizerOptions) *ForkedCompactSummarizer {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	return &ForkedCompactSummarizer{
+		agent:       opts.Agent,
+		provider:    opts.Provider,
+		model:       opts.Model,
+		logger:      logger,
+		bus:         opts.Bus,
+		middlewares: opts.Middlewares,
+	}
+}
+
+func (s *ForkedCompactSummarizer) Summarize(ctx context.Context, messages []agent.Message) (string, error) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+
+	cfg := s.agent.Config()
+
+	model := cfg.Model
+	if s.model != "" {
+		model = s.model
+	}
+
+	toolDefs := s.agent.RegisteredTools()
+
+	toolDefinitions := make([]agent.ToolDefinition, len(toolDefs))
+	for i, t := range toolDefs {
+		toolDefinitions[i] = t.Definition()
+	}
+
+	forkCfg := agent.Config{
+		Model:         model,
+		MaxIterations: 1,
+		SystemPrompts: cfg.SystemPrompts,
+	}
+
+	forkOpts := []agent.Option{
+		agent.WithLogger(s.logger.With("component", "compact_fork")),
+		agent.WithMessages(messages),
+	}
+
+	if s.bus != nil {
+		forkOpts = append(forkOpts, agent.WithBus(s.bus))
+	}
+
+	if len(s.middlewares) > 0 {
+		forkOpts = append(forkOpts, agent.WithMiddlewares(s.middlewares...))
+	}
+
+	forkAgent := agent.New(forkCfg, s.provider, forkOpts...)
+
+	for _, t := range toolDefs {
+		forkAgent.RegisterTool(t)
+	}
+
+	compactPrompt := compactInstruction
+
+	result, err := forkAgent.Process(ctx, agent.Content{Text: &compactPrompt})
+	if err != nil {
+		return "", fmt.Errorf("compact fork failed: %w", err)
+	}
+
+	if result.Output == "" {
+		return "", fmt.Errorf("compact fork returned empty output")
+	}
+
+	return strings.TrimSpace(result.Output), nil
 }
 
 type SmartSummarizer struct {

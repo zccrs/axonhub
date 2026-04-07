@@ -228,10 +228,17 @@ func (a *Agent) emit(ctx context.Context, event AgentEvent) {
 		event.RunID = a.runIDFromContext(ctx)
 	}
 
+	meta := bus.Metadata{
+		TraceID:  clawcontext.TraceID(ctx),
+		ThreadID: clawcontext.ThreadID(ctx),
+		Source:   clawcontext.Source(ctx),
+	}
+
 	if err := a.bus.Publish(ctx, bus.Event{
-		Topic:   TopicAgentEvent,
-		Type:    string(event.Type),
-		Payload: event,
+		Topic:    TopicAgentEvent,
+		Type:     string(event.Type),
+		Metadata: meta,
+		Payload:  event,
 	}); err != nil {
 		a.logger.Error("agent: failed to publish event", "error", err)
 	}

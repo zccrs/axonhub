@@ -445,6 +445,7 @@ func newIsolatedContext(ctx context.Context) context.Context {
 	traceID := uuid.New().String()
 	ctx = axoncontext.WithThreadID(ctx, threadID)
 	ctx = axoncontext.WithTraceID(ctx, traceID)
+	ctx = axoncontext.WithSource(ctx, "isolated")
 
 	return ctx
 }
