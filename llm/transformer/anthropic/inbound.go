@@ -120,7 +120,36 @@ func (t *InboundTransformer) TransformRequest(ctx context.Context, httpReq *http
 		}
 	}
 
-	return convertToLLMRequest(&anthropicReq)
+	llmReq, err := convertToLLMRequest(&anthropicReq)
+	if err != nil {
+		return nil, err
+	}
+
+	if isClaudeCodeRequest(httpReq) && anthropicReq.Metadata != nil && anthropicReq.Metadata.UserID != "" {
+		store := true
+		llmReq.Store = &store
+	}
+
+	return llmReq, nil
+}
+
+func isClaudeCodeRequest(httpReq *httpclient.Request) bool {
+	if httpReq == nil || httpReq.Headers == nil {
+		return false
+	}
+
+	if httpReq.Headers.Get("X-App") != "cli" {
+		return false
+	}
+
+	betas := httpReq.Headers.Values("Anthropic-Beta")
+	for _, betaHeader := range betas {
+		if strings.Contains(betaHeader, "claude-code-20250219") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // TransformResponse transforms ChatCompletionResponse to Anthropic HTTP response.

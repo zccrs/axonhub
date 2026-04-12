@@ -603,6 +603,37 @@ func TestInboundTransformer_TransformRequest_ThinkingValidation(t *testing.T) {
 	})
 }
 
+func TestInboundTransformer_TransformRequest_EnablesStoreForClaudeCode(t *testing.T) {
+	transformer := NewInboundTransformer()
+
+	req := &httpclient.Request{
+		Headers: http.Header{
+			"Content-Type":   []string{"application/json"},
+			"X-App":          []string{"cli"},
+			"Anthropic-Beta": []string{"claude-code-20250219,interleaved-thinking-2025-05-14"},
+		},
+		Body: []byte(`{
+			"model": "gpt-5.4",
+			"max_tokens": 1024,
+			"metadata": {
+				"user_id": "{\"device_id\":\"dev-1\",\"account_uuid\":\"\",\"session_id\":\"session-123\"}"
+			},
+			"messages": [
+				{
+					"role": "user",
+					"content": "Hello"
+				}
+			]
+		}`),
+	}
+
+	got, err := transformer.TransformRequest(t.Context(), req)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.Store)
+	require.True(t, *got.Store)
+}
+
 func TestInboundTransformer_TransformRequest_ToolResultWithImage(t *testing.T) {
 	transformer := NewInboundTransformer()
 
